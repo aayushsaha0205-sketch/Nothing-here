@@ -2,6 +2,10 @@ name: Deep audit Legendary Monuments crash
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/lm-deep-audit.yml'
+      - 'audit-trigger.txt'
 
 permissions:
   contents: read
