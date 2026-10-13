@@ -1,0 +1,212 @@
+name: Repair LM registry crash and remove Dream Catcher
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/lm-repair.yml'
+      - 'repair-trigger.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare ASM
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p repair/lib repair/out
+          for a in asm asm-tree; do
+            curl -fsSL "https://repo.maven.apache.org/maven2/org/ow2/asm/$a/9.7.1/$a-9.7.1.jar" -o "repair/lib/$a.jar"
+          done
+
+      - name: Patch bytecode and remove Dream Catcher assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > repair/PatchJar.java <<'JAVA'
+          import java.io.*;
+          import java.nio.file.*;
+          import java.util.*;
+          import java.util.zip.*;
+          import org.objectweb.asm.*;
+          import org.objectweb.asm.tree.*;
+
+          public class PatchJar {
+            static final String ITEMS="com/jorgaomc/legendarymonuments/items/ModItems";
+            static final String BLOCKS="com/jorgaomc/legendarymonuments/blocks/ModBlocks";
+            static final String LUMY="com/lumyverse/lumymon/item/ModItems";
+            static AbstractInsnNode realPrev(AbstractInsnNode n) {
+              n=n.getPrevious();
+              while(n!=null && (n.getType()==AbstractInsnNode.LABEL || n.getType()==AbstractInsnNode.LINE || n.getType()==AbstractInsnNode.FRAME)) n=n.getPrevious();
+              return n;
+            }
+            static AbstractInsnNode realNext(AbstractInsnNode n) {
+              n=n.getNext();
+              while(n!=null && (n.getType()==AbstractInsnNode.LABEL || n.getType()==AbstractInsnNode.LINE || n.getType()==AbstractInsnNode.FRAME)) n=n.getNext();
+              return n;
+            }
+            static void removeRange(MethodNode m, AbstractInsnNode start, AbstractInsnNode end) {
+              if(start==null || end==null) throw new IllegalStateException("Missing instruction range");
+              AbstractInsnNode n=start;
+              while(n!=null) {
+                AbstractInsnNode next=n.getNext();
+                m.instructions.remove(n);
+                if(n==end) return;
+                n=next;
+              }
+              throw new IllegalStateException("Instruction end not found");
+            }
+            static void removeInitialAssignment(ClassNode c, MethodNode m, String field) {
+              AbstractInsnNode first=null, prev=null;
+              for(AbstractInsnNode n=m.instructions.getFirst();n!=null;n=n.getNext()) {
+                if(n instanceof FieldInsnNode f && n.getOpcode()==Opcodes.PUTSTATIC && f.owner.equals(c.name) && f.name.equals(field)) { first=n; break; }
+                if(n.getOpcode()==Opcodes.PUTSTATIC) prev=n;
+              }
+              if(first==null) throw new IllegalStateException("No initial assignment for "+field);
+              AbstractInsnNode start=prev==null?m.instructions.getFirst():prev.getNext();
+              removeRange(m,start,first);
+            }
+            static ClassNode read(byte[] b) { ClassNode c=new ClassNode(); new ClassReader(b).accept(c,0); return c; }
+            static byte[] write(ClassNode c) { ClassWriter w=new ClassWriter(ClassWriter.COMPUTE_MAXS); c.accept(w); return w.toByteArray(); }
+            static byte[] patchItems(byte[] b) {
+              ClassNode c=read(b); MethodNode cl=null;
+              for(MethodNode m:c.methods) if(m.name.equals("<clinit>")) cl=m;
+              if(cl==null) throw new IllegalStateException("ModItems <clinit> missing");
+              Set<String> alias=new LinkedHashSet<>();
+              for(AbstractInsnNode n=cl.instructions.getFirst();n!=null;n=n.getNext()) {
+                if(n instanceof FieldInsnNode f && n.getOpcode()==Opcodes.GETSTATIC && f.owner.equals(LUMY)) {
+                  AbstractInsnNode q=realNext(n);
+                  if(q instanceof FieldInsnNode p && q.getOpcode()==Opcodes.PUTSTATIC && p.owner.equals(ITEMS)) alias.add(p.name);
+                }
+              }
+              List<String> fields=new ArrayList<>(alias);
+              Collections.reverse(fields);
+              for(String field:fields) removeInitialAssignment(c,cl,field);
+              if(fields.size()<15) throw new IllegalStateException("Unexpected alias field count: "+fields.size());
+              // Keep the final aliases to LumyMon; only prevent discarded LM Item instances being constructed.
+              return write(c);
+            }
+            static byte[] patchBlocks(byte[] b) {
+              ClassNode c=read(b); MethodNode m=null;
+              for(MethodNode x:c.methods) if(x.name.equals("registerBlocks")) m=x;
+              if(m==null) throw new IllegalStateException("registerBlocks missing");
+              removeInitialAssignment(c,m,"DREAM_CATCHER");
+              boolean removed=false;
+              for(AbstractInsnNode n=m.instructions.getFirst();n!=null;n=n.getNext()) {
+                if(n instanceof LdcInsnNode l && "dream_catcher".equals(l.cst)) {
+                  AbstractInsnNode a=realNext(n), call=realNext(a);
+                  if(a instanceof FieldInsnNode f && f.owner.equals(BLOCKS) && f.name.equals("DREAM_CATCHER") &&
+                     call instanceof MethodInsnNode mi && mi.owner.equals(BLOCKS) && mi.name.equals("register")) {
+                    removeRange(m,n,call); removed=true; break;
+                  }
+                }
+              }
+              if(!removed) throw new IllegalStateException("Dream Catcher block registration call not found");
+              return write(c);
+            }
+            static byte[] patchCreative(byte[] b) {
+              ClassNode c=read(b);
+              for(MethodNode m:c.methods) for(AbstractInsnNode n=m.instructions.getFirst();n!=null;n=n.getNext()) {
+                if(n instanceof MethodInsnNode mi && n.getOpcode()==Opcodes.INVOKESTATIC && mi.owner.equals(ITEMS) && mi.name.equals("acceptBlock")) {
+                  AbstractInsnNode a=realPrev(n), p=realPrev(a);
+                  if(a instanceof FieldInsnNode f && f.owner.equals(BLOCKS) && f.name.equals("DREAM_CATCHER")) removeRange(m,p,n);
+                }
+              }
+              return write(c);
+            }
+            static byte[] patchClient(byte[] b) {
+              ClassNode c=read(b);
+              for(MethodNode m:c.methods) for(AbstractInsnNode n=m.instructions.getFirst();n!=null;n=n.getNext()) {
+                if(n instanceof MethodInsnNode mi && mi.name.equals("putBlock")) {
+                  AbstractInsnNode a=realPrev(n), p=realPrev(a), q=realPrev(p);
+                  if(a instanceof MethodInsnNode && p instanceof FieldInsnNode f && f.owner.equals(BLOCKS) && f.name.equals("DREAM_CATCHER")) removeRange(m,q,n);
+                }
+              }
+              return write(c);
+            }
+            static byte[] patchVillager(byte[] b) {
+              ClassNode c=read(b); int count=0;
+              for(MethodNode m:c.methods) for(AbstractInsnNode n=m.instructions.getFirst();n!=null;n=n.getNext()) {
+                if(n instanceof FieldInsnNode f && n.getOpcode()==Opcodes.GETSTATIC && f.owner.equals(BLOCKS) && f.name.equals("DREAM_CATCHER")) {
+                  AbstractInsnNode q=realNext(n);
+                  if(q instanceof MethodInsnNode mi && mi.name.equals("method_8389")) {
+                    m.instructions.set(n,new FieldInsnNode(Opcodes.GETSTATIC,ITEMS,"POKETREAT_BOX","Lnet/minecraft/class_1792;"));
+                    m.instructions.remove(q); count++;
+                  }
+                }
+              }
+              if(count!=1) throw new IllegalStateException("Expected one Dream Catcher villager trade; patched "+count);
+              return write(c);
+            }
+            public static void main(String[] args) throws Exception {
+              Path in=Paths.get(args[0]), out=Paths.get(args[1]);
+              Set<String> removed=new TreeSet<>();
+              Set<String> touched=new TreeSet<>();
+              try(ZipFile z=new ZipFile(in.toFile()); ZipOutputStream zo=new ZipOutputStream(Files.newOutputStream(out))) {
+                Enumeration<? extends ZipEntry> es=z.entries();
+                while(es.hasMoreElements()) {
+                  ZipEntry e=es.nextElement(); String n=e.getName();
+                  if(e.isDirectory()) { zo.putNextEntry(new ZipEntry(n)); zo.closeEntry(); continue; }
+                  String low=n.toLowerCase(Locale.ROOT);
+                  if(low.contains("dream_catcher") ||
+                     n.equals("data/legendarymonuments/advancement/sweet_dreams_are_made_of_this.json") ||
+                     n.equals("com/jorgaomc/legendarymonuments/blocks/DreamCatcherBlock.class")) {
+                    removed.add(n); continue;
+                  }
+                  byte[] data;
+                  try(InputStream is=z.getInputStream(e)) { data=is.readAllBytes(); }
+                  if(n.equals(ITEMS+".class")) { data=patchItems(data); touched.add(n); }
+                  if(n.equals(BLOCKS+".class")) { data=patchBlocks(data); touched.add(n); }
+                  if(n.equals("com/jorgaomc/legendarymonuments/items/ModItems.class")) { data=patchCreative(data); touched.add(n); }
+                  if(n.equals("com/jorgaomc/legendarymonuments/LegendaryMonumentsFabricClient.class")) { data=patchClient(data); touched.add(n); }
+                  if(n.equals("com/jorgaomc/legendarymonuments/villagers/ModVillagersImpl.class")) { data=patchVillager(data); touched.add(n); }
+                  if(n.startsWith("assets/legendarymonuments/lang/") && n.endsWith(".json")) {
+                    String s=new String(data,java.nio.charset.StandardCharsets.UTF_8);
+                    try {
+                      com.google.gson.JsonObject obj=com.google.gson.JsonParser.parseString(s).getAsJsonObject();
+                      List<String> keys=new ArrayList<>();
+                      for(String k:obj.keySet()) if(k.toLowerCase(Locale.ROOT).contains("dream_catcher")) keys.add(k);
+                      for(String k:keys) obj.remove(k);
+                      data=new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(obj).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    } catch(Exception ignored) {}
+                  }
+                  ZipEntry ne=new ZipEntry(n); ne.setTime(e.getTime()); zo.putNextEntry(ne); zo.write(data); zo.closeEntry();
+                }
+              }
+              Files.writeString(Paths.get(args[2]),"Input: "+in+"\nOutput: "+out+"\nDream Catcher entries removed: "+removed.size()+"\n"+String.join("\n",removed)+"\n\nClasses patched:\n"+String.join("\n",touched)+"\n");
+              if(removed.size()<6) throw new IllegalStateException("Too few Dream Catcher resources removed: "+removed.size());
+            }
+          }
+          JAVA
+          curl -fsSL https://repo.maven.apache.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.jar -o repair/lib/gson.jar
+          javac -cp 'repair/lib/*' -d repair repair/PatchJar.java
+          java -cp 'repair:repair/lib/*' PatchJar LegendaryMonuments-8.2-LumyMon-FINAL-AUDITED-1.0.4.jar repair/out/LegendaryMonuments-8.2-LumyMon-CRASHFIX-DREAMCATCHER-REMOVED.jar repair/out/patch-report.txt
+          unzip -t repair/out/LegendaryMonuments-8.2-LumyMon-CRASHFIX-DREAMCATCHER-REMOVED.jar > repair/out/zip-test.txt
+          python3 - <<'PY'
+          import zipfile, json, hashlib, pathlib
+          p=pathlib.Path("repair/out/LegendaryMonuments-8.2-LumyMon-CRASHFIX-DREAMCATCHER-REMOVED.jar")
+          with zipfile.ZipFile(p) as z:
+              bad=[]
+              for n in z.namelist():
+                  if n.endswith(".json"):
+                      try: json.loads(z.read(n))
+                      except Exception as e: bad.append((n,str(e)))
+              if bad: raise SystemExit("JSON parse errors: "+repr(bad[:10]))
+              names=z.namelist()
+              remaining=[n for n in names if "dream_catcher" in n.lower() or n.endswith("DreamCatcherBlock.class") or "sweet_dreams_are_made_of_this" in n]
+              if remaining: raise SystemExit("Dream Catcher entries remain: "+repr(remaining))
+          print("ZIP_OK",p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest(),"JSON_OK")
+          PY
+
+      - name: Upload repaired JAR and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: lm-crashfix-dreamcatcher-removed
+          path: repair/out/
+          if-no-files-found: error
