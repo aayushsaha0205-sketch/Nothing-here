@@ -1,0 +1,47 @@
+name: Deep audit Legendary Monuments crash
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect registry and Dream Catcher classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAR="LegendaryMonuments-8.2-LumyMon-FINAL-AUDITED-1.0.4.jar"
+          mkdir -p deep-audit
+          sha256sum "$JAR" > deep-audit/input-sha256.txt
+          unzip -t "$JAR" > deep-audit/zip-test.txt
+          unzip -Z1 "$JAR" > deep-audit/all-entries.txt
+          python3 - <<'PY'
+          import zipfile, pathlib, re
+          p=pathlib.Path("LegendaryMonuments-8.2-LumyMon-FINAL-AUDITED-1.0.4.jar")
+          out=pathlib.Path("deep-audit/dream-catcher-and-registry.txt")
+          patterns=re.compile(r'dream.?catch|ModItemsRegistry|ModBlocksRegistry|ModBlockEntitiesRegistry|ModEffectsRegistry|Registry|RegistryManager',re.I)
+          with zipfile.ZipFile(p) as z, out.open("w",encoding="utf-8") as f:
+              for n in z.namelist():
+                  if patterns.search(n):
+                      f.write(n+"\n")
+                      if n.endswith(".json") and ("dream" in n.lower() or "fabric.mod.json" in n):
+                          try:
+                              f.write(z.read(n).decode("utf-8","replace")+"\n")
+                          except Exception as e: f.write(str(e)+"\n")
+          PY
+          curl -fsSL https://github.com/Vineflower/vineflower/releases/latest/download/vineflower.jar -o deep-audit/vineflower.jar
+          java -jar deep-audit/vineflower.jar "$JAR" deep-audit/decompiled
+          find deep-audit/decompiled -type f -name '*.java' | sort > deep-audit/decompiled-files.txt
+          grep -RniE 'dream.?catch|register\(' deep-audit/decompiled --include='*.java' > deep-audit/registration-hits.txt || true
+          grep -RniE 'class (ModItemsRegistry|ModBlocksRegistry|ModBlockEntitiesRegistry|ModEffectsRegistry)|class DreamCatcherBlock|dream_catcher' deep-audit/decompiled --include='*.java' > deep-audit/relevant-source-hits.txt || true
+      - name: Upload deep audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: legendary-monuments-deep-audit
+          path: deep-audit/
+          if-no-files-found: error
