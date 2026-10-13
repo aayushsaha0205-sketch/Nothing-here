@@ -131,17 +131,27 @@ jobs:
               return write(c);
             }
             static byte[] patchVillager(byte[] b) {
-              ClassNode c=read(b); int count=0;
+              ClassNode c=read(b); MethodNode supplier=null;
               for(MethodNode m:c.methods) for(AbstractInsnNode n=m.instructions.getFirst();n!=null;n=n.getNext()) {
-                if(n instanceof FieldInsnNode f && n.getOpcode()==Opcodes.GETSTATIC && f.owner.equals(BLOCKS) && f.name.equals("DREAM_CATCHER")) {
-                  AbstractInsnNode q=realNext(n);
-                  if(q instanceof MethodInsnNode mi && mi.name.equals("method_8389")) {
-                    m.instructions.set(n,new FieldInsnNode(Opcodes.GETSTATIC,ITEMS,"POKETREAT_BOX","Lnet/minecraft/class_1792;"));
-                    m.instructions.remove(q); count++;
+                if(n instanceof FieldInsnNode f && n.getOpcode()==Opcodes.GETSTATIC && f.owner.equals(BLOCKS) && f.name.equals("DREAM_CATCHER")) supplier=m;
+              }
+              if(supplier==null) throw new IllegalStateException("Dream Catcher trade supplier not found");
+              int removed=0;
+              for(MethodNode m:c.methods) {
+                for(AbstractInsnNode n=m.instructions.getFirst();n!=null;n=n.getNext()) {
+                  if(n instanceof InvokeDynamicInsnNode indy) {
+                    boolean target=false;
+                    for(Object arg:indy.bsmArgs) if(arg instanceof Handle h && h.getOwner().equals(c.name) && h.getName().equals(supplier.name) && h.getDesc().equals(supplier.desc)) target=true;
+                    if(target) {
+                      AbstractInsnNode add=realNext(n), pop=realNext(add), before=realPrev(n);
+                      if(add instanceof MethodInsnNode mi && mi.name.equals("add") && pop!=null && pop.getOpcode()==Opcodes.POP && before!=null && before.getOpcode()==Opcodes.ALOAD) {
+                        removeRange(m,before,pop); removed++; break;
+                      }
+                    }
                   }
                 }
               }
-              if(count!=1) throw new IllegalStateException("Expected one Dream Catcher villager trade; patched "+count);
+              if(removed!=1) throw new IllegalStateException("Expected to remove exactly one Dream Catcher villager trade; removed "+removed);
               return write(c);
             }
             public static void main(String[] args) throws Exception {
