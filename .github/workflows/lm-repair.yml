@@ -89,7 +89,16 @@ jobs:
               Collections.reverse(fields);
               for(String field:fields) removeInitialAssignment(c,cl,field);
               if(fields.size()<15) throw new IllegalStateException("Unexpected alias field count: "+fields.size());
-              // Keep the final aliases to LumyMon; only prevent discarded LM Item instances being constructed.
+              // These four gameplay items were also being constructed but deliberately skipped by the registry helper.
+              // They are LM-owned crop/quest items, not LumyMon aliases, so allow their intended registration.
+              for(MethodNode method:c.methods) if(method.name.equals("register")) {
+                for(AbstractInsnNode n=method.instructions.getFirst();n!=null;n=n.getNext()) {
+                  if(n instanceof LdcInsnNode l && (l.cst.equals("iceroot_carrot") || l.cst.equals("iceroot_carrot_seeds") || l.cst.equals("shaderoot_carrot") || l.cst.equals("shaderoot_carrot_seeds"))) {
+                    l.cst="__registered_gameplay_item__";
+                  }
+                }
+              }
+              // Keep final LumyMon aliases, omit orphan LM objects, and preserve the four quest/crop items.
               return write(c);
             }
             static byte[] patchBlocks(byte[] b) {
