@@ -38,7 +38,7 @@ jobs:
                               f.write(z.read(n).decode("utf-8","replace")+"\n")
                           except Exception as e: f.write(str(e)+"\n")
           PY
-          curl -fsSL https://github.com/Vineflower/vineflower/releases/latest/download/vineflower.jar -o deep-audit/vineflower.jar
+          curl -fsSL https://repo.maven.apache.org/maven2/org/vineflower/vineflower/1.11.1/vineflower-1.11.1.jar -o deep-audit/vineflower.jar
           java -jar deep-audit/vineflower.jar "$JAR" deep-audit/decompiled
           find deep-audit/decompiled -type f -name '*.java' | sort > deep-audit/decompiled-files.txt
           grep -RniE 'dream.?catch|register\(' deep-audit/decompiled --include='*.java' > deep-audit/registration-hits.txt || true
